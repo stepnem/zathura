@@ -290,6 +290,8 @@ struct
 
   struct
   {
+    GKeyFile *data;
+    char     *file;
     Marker* markers;
     int number_of_markers;
     int last;
@@ -369,6 +371,7 @@ struct
 void init_look(void);
 void init_directories(void);
 void init_bookmarks(void);
+void init_marks(void);
 void init_keylist(void);
 void init_settings(void);
 void init_zathura(void);
@@ -388,6 +391,7 @@ void open_uri(char*);
 void out_of_memory(void) NORETURN;
 void update_status(void);
 void read_bookmarks_file(void);
+void read_marks_file(void);
 void read_configuration_file(const char*);
 void read_configuration(void);
 void recalc_rectangle(int, PopplerRectangle*);
@@ -397,6 +401,7 @@ void switch_view(GtkWidget*);
 void save_page_position(PagePosition*, int);
 void restore_page_position(PagePosition*);
 void position_bookmark(Bookmark*, const gchar*, const gchar*);
+void position_mark(Marker*, const gchar*, const gchar*);
 GtkEventBox* create_completion_row(GtkBox*, char*, char*, gboolean);
 gchar* fix_path(const gchar*);
 gchar* path_from_env(const gchar*);
@@ -642,6 +647,17 @@ init_bookmarks(void)
 }
 
 void
+init_marks(void)
+{
+  Zathura.Marker.markers           = NULL;
+  Zathura.Marker.number_of_markers =  0;
+  Zathura.Marker.last              = -1;
+
+  Zathura.Marker.file = g_build_filename(Zathura.Config.data_dir, MARK_FILE, NULL);
+  read_marks_file();
+}
+
+void
 init_keylist(void)
 {
   ShortcutList* e = NULL;
@@ -695,10 +711,6 @@ init_zathura(void)
 
   Zathura.State.pages             = g_strdup("");
   Zathura.State.scroll_percentage = 0;
-
-  Zathura.Marker.markers           = NULL;
-  Zathura.Marker.number_of_markers =  0;
-  Zathura.Marker.last              = -1;
 
   Zathura.Search.results = NULL;
   Zathura.Search.page    = 0;
@@ -1065,6 +1077,9 @@ close_file(gboolean keep_monitor)
     free(current_page);
   }
 
+  char* master_section = g_strdup(Zathura.PDF.file);
+  char* positions_section = g_strdup_printf("%s#positions", master_section);
+
   /* save bookmarks */
   if(Zathura.Bookmarks.data)
   {
@@ -1086,23 +1101,19 @@ close_file(gboolean keep_monitor)
     Bookmark bm;
     gsize location_length = 3;
     gint* location = malloc(sizeof(gint) * location_length);
-    char* master_section, *positions_section;
     for(i = 0; i < Zathura.Bookmarks.number_of_bookmarks; i++)
     {
       bm = Zathura.Bookmarks.bookmarks[i];
 
-      master_section = Zathura.PDF.file;
       g_key_file_set_integer(Zathura.Bookmarks.data, master_section,
                              bm.id, bm.page);
 
-      positions_section = g_strdup_printf("%s#positions", master_section);
       location[0] = bm.scale;
       location[1] = bm.position.x;
       location[2] = bm.position.y;
       g_key_file_set_integer_list(Zathura.Bookmarks.data, positions_section,
                                   bm.id, location, location_length);
       g_free(bm.id);
-      g_free(positions_section);
     }
     free(location);
     free(Zathura.Bookmarks.bookmarks);
@@ -1114,6 +1125,41 @@ close_file(gboolean keep_monitor)
     g_file_set_contents(Zathura.Bookmarks.file, bookmarks, -1, NULL);
     g_free(bookmarks);
   }
+
+  /* save markers */
+  if(Zathura.Marker.data)
+  {
+    read_marks_file();
+
+    int i;
+    Marker m;
+    gsize location_length = 2;
+    gint* location = malloc(sizeof(gint) * location_length);
+    for(i = 0; i < Zathura.Marker.number_of_markers; i++)
+    {
+      m = Zathura.Marker.markers[i];
+
+      g_key_file_set_integer(Zathura.Marker.data, master_section,
+                             g_strdup_printf("%d", m.id), m.page);
+
+      location[0] = m.position.x;
+      location[1] = m.position.y;
+      g_key_file_set_integer_list(Zathura.Marker.data, positions_section,
+                                  g_strdup_printf("%d", m.id), location, location_length);
+    }
+
+    free(Zathura.Marker.markers);
+    Zathura.Marker.number_of_markers =  0;
+    Zathura.Marker.last              = -1;
+
+    /* convert file and save it */
+    gchar* marks = g_key_file_to_data(Zathura.Marker.data, NULL, NULL);
+    g_file_set_contents(Zathura.Marker.file, marks, -1, NULL);
+    g_free(marks);
+  }
+
+  g_free(positions_section);
+  g_free(master_section);
 
   /* inotify */
   if(!keep_monitor)
@@ -1168,12 +1214,6 @@ close_file(gboolean keep_monitor)
     gtk_widget_destroy(Zathura.UI.information);
     Zathura.UI.information = NULL;
   }
-
-  /* free markers */
-  if(Zathura.Marker.markers)
-    free(Zathura.Marker.markers);
-  Zathura.Marker.number_of_markers =  0;
-  Zathura.Marker.last              = -1;
 
   update_status();
 }
@@ -1456,6 +1496,33 @@ open_file(char* path, char* password)
     g_strfreev(keys);
   }
 
+  /* marks */
+  if(Zathura.Marker.data && g_key_file_has_group(Zathura.Marker.data, file))
+  {
+    gsize i              = 0;
+    gsize number_of_keys = 0;
+    char** keys          = g_key_file_get_keys(Zathura.Marker.data, file, &number_of_keys, NULL);
+    Marker* marks;
+
+    for(i = 0; i < number_of_keys; i++)
+    {
+      int next = Zathura.Marker.number_of_markers;
+      Zathura.Marker.markers = realloc(Zathura.Marker.markers,
+          (next + 1) * sizeof(Marker));
+
+      marks = Zathura.Marker.markers;
+      marks[next].id   = atoi(keys[i]);
+      marks[next].page =
+        g_key_file_get_integer(Zathura.Marker.data, file, keys[i], NULL);
+
+      position_mark(&marks[next], file, keys[i]);
+
+      Zathura.Marker.number_of_markers++;
+    }
+
+    g_strfreev(keys);
+  }
+
   /* set window title */
   gtk_window_set_title(GTK_WINDOW(Zathura.UI.window), basename(file));
 
@@ -1486,6 +1553,28 @@ position_bookmark(Bookmark* bmark, const gchar* file, const gchar* key)
       bmark->scale      = location[0];
       bmark->position.x = location[1];
       bmark->position.y = location[2];
+      g_free(location);
+    }
+  }
+  g_free(section);
+}
+
+void
+position_mark(Marker* mark, const gchar* file, const gchar* key)
+{
+  mark->position.x = 0;
+  mark->position.y = 0;
+
+  char* section = g_strdup_printf("%s#positions", file);
+  gsize length = 2;
+  if(g_key_file_has_group(Zathura.Marker.data, section))
+  {
+    gint* location = g_key_file_get_integer_list(Zathura.Marker.data,
+                                                 section, key, &length, NULL);
+    if(location)
+    {
+      mark->position.x = location[0];
+      mark->position.y = location[1];
       g_free(location);
     }
   }
@@ -1617,6 +1706,31 @@ read_bookmarks_file(void)
         G_KEY_FILE_KEEP_COMMENTS | G_KEY_FILE_KEEP_TRANSLATIONS, &error))
   {
     gchar* message = g_strdup_printf("Could not load bookmark file: %s", error->message);
+    notify(ERROR, message);
+    g_free(message);
+  }
+}
+
+void
+read_marks_file(void)
+{
+  /* free it first */
+  if (Zathura.Marker.data)
+    g_key_file_free(Zathura.Marker.data);
+
+  /* create or open existing mark file */
+  Zathura.Marker.data = g_key_file_new();
+  if(!g_file_test(Zathura.Marker.file, G_FILE_TEST_IS_REGULAR))
+  {
+    /* file does not exist */
+    g_file_set_contents(Zathura.Marker.file, "# Zathura marks\n", -1, NULL);
+  }
+
+  GError* error = NULL;
+  if(!g_key_file_load_from_file(Zathura.Marker.data, Zathura.Marker.file,
+        G_KEY_FILE_KEEP_COMMENTS | G_KEY_FILE_KEEP_TRANSLATIONS, &error))
+  {
+    gchar* message = g_strdup_printf("Could not load mark file: %s", error->message);
     notify(ERROR, message);
     g_free(message);
   }
@@ -4858,6 +4972,7 @@ int main(int argc, char* argv[])
   read_configuration();
   init_settings();
   init_bookmarks();
+  init_marks();
   init_look();
 
   if(argc > 1)

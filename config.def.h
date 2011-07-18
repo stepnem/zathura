@@ -21,6 +21,7 @@ static const char FORMAT_DESCRIPTION[] = "<i>%s</i>";
 
 /* directories and files */
 static const char BOOKMARK_FILE[] = "bookmarks";
+static const char MARK_FILE[]     = "marks";
 static const char ZATHURA_RC[]    = "zathurarc";
 static const char GLOBAL_RC[]     = "/etc/zathurarc";
 static const char CONFIG_DIR[]    = "~/.config/zathura";
